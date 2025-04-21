@@ -1,5 +1,6 @@
+/* src/pages/Events/ViewEvents.tsx */
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { Button, Col, Row } from 'react-bootstrap';
+import { Button, Col, Row, Container, Alert } from 'react-bootstrap'; // Added Container and Alert
 import * as icon from 'react-bootstrap-icons';
 import { NavLink, useParams } from 'react-router-dom';
 
@@ -20,13 +21,14 @@ import AuthContext from '../../context/AuthContext';
 const Events: React.FC = () => {
     const { user, token } = useContext(AuthContext);
     const [searchTerm, setSearchTerm] = useState('');
-    const [organizations, setOrganizations] = useState<Organization[]>([]);
-    const [lastEvaluatedKeyOrg, setlastEvaluatedKeyOrg] = useState<string | null>(null);
-    const [events, setEvents] = useState<Event[]>([]);
-    const [lastEvaluatedKeyOrgEvent, setlastEvaluatedKeyOrgEvent] = useState<
+    const [organizations, setOrganizations] = useState<Organization[]>([]); // Keep track of orgs
+    const [lastEvaluatedKeyOrg, setLastEvaluatedKeyOrg] = useState<string | null>(null);
+    const [events, setEvents] = useState<Event[]>([]); // Master list of all fetched events
+    const [filteredEvents, setFilteredEvents] = useState<Event[]>([]); // Filtered list for display
+    const [lastEvaluatedKeyOrgEvent, setLastEvaluatedKeyOrgEvent] = useState<
         Record<string, string | null>
     >({});
-    const [loading, setLoading] = useState<boolean>(false);
+    const [loading, setLoading] = useState<boolean>(true); // Combined loading state
     const [error, setError] = useState<string | null>(null);
     const [hasMore, setHasMore] = useState<boolean>(true);
     const fetchedRef = useRef(false);
@@ -38,8 +40,6 @@ const Events: React.FC = () => {
 
     const handleSearchSubmit = (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
-        console.log('Search submitted:', searchTerm);
-        // Implement your search logic here organizations
     };
 
     /* Components to be injected into the TopBar*/
@@ -48,7 +48,7 @@ const Events: React.FC = () => {
             value={searchTerm}
             onChange={handleSearchChange}
             onSubmit={handleSearchSubmit}
-            placeholder="Search events..."
+            placeholder="Search events by name or description..." // Updated placeholder
             className="ms-3"
         />
     );
@@ -87,150 +87,151 @@ const Events: React.FC = () => {
     const pageActionComponents = (
         <>
             <div className="d-flex align-items-center gap-3">
-                {user && token ? (
-                    <>
-                        {/* Apply to Organization should only appear when an user who is not part of an org is logged in */}
-                        {/* <NavButton
-                            to="/organizations/:id/apply"
-                            variant="outline-light"
-                            className="mx-1 top-bar-element"
-                        >
-                            Apply to Organization
-                        </NavButton> */}
-
-                        {/* PersonLinesFill icon should only appear when an admin user of an org is logged in */}
-                        <NavLink
-                            to={`/organizations/${id}/members`}
-                            className="text-light top-bar-element"
-                        >
-                            <icon.PersonLinesFill size={24} />
-                        </NavLink>
-                        <NavLink
-                            to={`/organizations/${id}/details`}
-                            className="text-light top-bar-element"
-                        >
-                            <icon.ListUl size={24} />
-                        </NavLink>
-                    </>
-                ) : (
-                    <></>
-                )}
+                {/* Placeholder for potential future actions */}
             </div>
         </>
     );
 
+    // Fetches organizations (needed to iterate and get events)
     const fetchOrganizations = async (
         key: string | undefined = undefined
     ): Promise<OrganizationsResponse | null> => {
-        setLoading(true);
+        setLoading(true); // Start loading when fetching orgs
         try {
-            const orgs = await getPublicOrganizations(key);
-            const newOrgs = orgs;
+            const orgsResponse = await getPublicOrganizations(key);
+            const newOrgs = orgsResponse.data.organizations;
 
             if (key) {
-                setOrganizations(prev => [...prev, ...newOrgs.data.organizations]);
+                // Append new orgs if loading more
+                setOrganizations(prev => {
+                    const existingIds = new Set(prev.map(org => org.id));
+                    const uniqueNewOrgs = newOrgs.filter(org => !existingIds.has(org.id));
+                    return [...prev, ...uniqueNewOrgs];
+                });
             } else {
-                setOrganizations(newOrgs.data.organizations);
+                // Initial fetch, set the orgs
+                setOrganizations(newOrgs);
             }
 
-            setlastEvaluatedKeyOrg(orgs.lastEvaluatedKey);
-            setHasMore(orgs.lastEvaluatedKey !== null);
-            setLoading(false);
-            console.log(newOrgs);
-            return newOrgs;
+            setLastEvaluatedKeyOrg(orgsResponse.lastEvaluatedKey);
+            return orgsResponse; // Return the response to chain fetches
         } catch (err) {
             setError('Failed to fetch organizations');
-            setLoading(false);
+            setLoading(false); // Stop loading on error
             return null;
         }
     };
 
-    const fetchEventsForOrganizations = async (orgs: Organization[]) => {
-        const newEvents: Event[] = [];
+    // Fetches events for a given list of organizations
+    const fetchEventsForOrganizations = async (orgs: Organization[], isInitialFetch: boolean) => {
+        const eventPromises = orgs.map(async org => {
+            const key = lastEvaluatedKeyOrgEvent[org.id];
+            // Skip fetching if we already know there are no more events for this org
+            if (!isInitialFetch && key === null) {
+                return { orgId: org.id, events: [], lastKey: null };
+            }
+            try {
+                // Use org.name as the identifier for fetching events
+                const res = await getPublicOrganizationEvents(org.name, key ?? undefined);
+                return { orgId: org.id, events: res.data.events, lastKey: res.lastEvaluatedKey ?? null };
+            } catch (err) {
+                console.error(`Failed to fetch events for org ${org.name}:`, err);
+                return { orgId: org.id, events: [], lastKey: null }; // Return empty on error for this org
+            }
+        });
+
+        const results = await Promise.all(eventPromises);
+        const allNewEvents: Event[] = [];
         const newEventKeys: Record<string, string | null> = {};
 
-        for (const org of orgs) {
-            try {
-                const res = await getPublicOrganizationEvents(org.name);
-                // console.log(org.name)
-                // console.log(res)
-                newEvents.push(...res.data.events);
-                newEventKeys[org.id] = res.lastEvaluatedKey ?? null;
-            } catch {
-                console.error(`Failed to fetch events for org ${org.id}`);
-            }
-        }
+        results.forEach(result => {
+            allNewEvents.push(...result.events);
+            newEventKeys[result.orgId] = result.lastKey;
+        });
 
-        setEvents(prev => [...prev, ...newEvents]);
-        setlastEvaluatedKeyOrgEvent(prev => ({ ...prev, ...newEventKeys }));
+        // Append new events, avoiding duplicates
+        setEvents(prev => {
+            const existingEventIds = new Set(prev.map(event => event.id));
+            const uniqueNewEvents = allNewEvents.filter(event => !existingEventIds.has(event.id));
+            return [...prev, ...uniqueNewEvents];
+        });
+
+        // Update the keys for each organization
+        setLastEvaluatedKeyOrgEvent(prev => ({ ...prev, ...newEventKeys }));
+
+        // Determine if there are more events to load (across all orgs)
+        const anyOrgHasMore = Object.values(newEventKeys).some(key => key !== null);
+        return anyOrgHasMore;
     };
 
+    // Initial data fetch effect
     useEffect(() => {
         if (fetchedRef.current) return;
         fetchedRef.current = true;
 
         const initialize = async () => {
             setLoading(true);
-            const newOrgs = await fetchOrganizations();
-            if (newOrgs) {
-                await fetchEventsForOrganizations(newOrgs.data.organizations);
-                setLoading(false);
+            const orgResponse = await fetchOrganizations(); // Fetch initial orgs
+            if (orgResponse?.data?.organizations) {
+                const orgs = orgResponse.data.organizations;
+                if (orgs.length > 0) {
+                    const anyOrgHasMoreEvents = await fetchEventsForOrganizations(orgs, true);
+                    setHasMore(orgResponse.lastEvaluatedKey !== null || anyOrgHasMoreEvents);
+                } else {
+                    setHasMore(false); // No orgs, so no more data
+                }
+            } else {
+                setHasMore(false); // Error fetching orgs or no orgs
             }
+            setLoading(false);
         };
 
         initialize();
-    }, []);
+    }, []); // Run only once on mount
 
+    // Filter events based on search term
+    useEffect(() => {
+        if (searchTerm.trim() === '') {
+            setFilteredEvents(events);
+        } else {
+            const searchLower = searchTerm.toLowerCase();
+            const filtered = events.filter(event => {
+                const titleMatch = event.title.toLowerCase().includes(searchLower);
+                const descMatch = event.description?.toLowerCase().includes(searchLower) || false;
+                return titleMatch || descMatch;
+            });
+            setFilteredEvents(filtered);
+        }
+    }, [events, searchTerm]);
+
+    // Handle loading more data
     const loadMore = async () => {
-        if (loading) return;
+        if (loading || !hasMore) return; // Don't load if already loading or no more data
         setLoading(true);
 
-        let allFetched = true;
-        const newEvents: Event[] = [];
-        const updatedKeys: Record<string, string | null> = { ...lastEvaluatedKeyOrgEvent };
+        // Check if any current organization has more events to fetch
+        let orgsWithMoreEvents = organizations.filter(org => lastEvaluatedKeyOrgEvent[org.id] !== null);
 
-        // Fetch more events for current orgs
-        for (const org of organizations) {
-            // Use `organizations` here
-            const nextKey = lastEvaluatedKeyOrgEvent[org.id];
-            if (nextKey !== null) {
-                try {
-                    const res = await getPublicOrganizationEvents(org.id, nextKey);
-                    newEvents.push(...res.data.events);
-                    updatedKeys[org.id] = res.lastEvaluatedKey ?? null;
-
-                    if (res.lastEvaluatedKey !== null) {
-                        allFetched = false;
-                    }
-                } catch {
-                    console.error(`Error fetching more events for org ${org.id}`);
-                }
-            }
+        let moreEventsFetched = false;
+        if (orgsWithMoreEvents.length > 0) {
+            moreEventsFetched = await fetchEventsForOrganizations(orgsWithMoreEvents, false);
         }
 
-        setEvents(prev => [...prev, ...newEvents]);
-        setlastEvaluatedKeyOrgEvent(updatedKeys);
-
-        // If all events were fetched, try fetching more orgs
-        let newOrgKey = lastEvaluatedKeyOrg;
+        // If no more events from current orgs AND there are more orgs to fetch
         let moreOrgsFetched = false;
-        if (allFetched && lastEvaluatedKeyOrg !== null) {
-            const newOrgs = await fetchOrganizations(lastEvaluatedKeyOrg);
-            if (newOrgs) {
-                await fetchEventsForOrganizations(newOrgs.data.organizations);
-                newOrgKey = newOrgs.data.organizations.length > 0 ? newOrgs.lastEvaluatedKey : null; // Use newOrgs to get the key
-                moreOrgsFetched = newOrgs.data.organizations.length > 0 ? true : false;
+        if (!moreEventsFetched && lastEvaluatedKeyOrg !== null) {
+            const orgResponse = await fetchOrganizations(lastEvaluatedKeyOrg);
+            if (orgResponse?.data?.organizations && orgResponse.data.organizations.length > 0) {
+                moreOrgsFetched = true;
+                // Fetch events for the newly loaded organizations
+                moreEventsFetched = await fetchEventsForOrganizations(orgResponse.data.organizations, true);
             }
         }
 
-        // Determine if there's more data
-        const anyOrgHasMoreEvents = Object.values(updatedKeys).some(k => k !== null);
-        const canFetchMoreOrgs = newOrgKey !== null;
+        // Update hasMore state
+        const stillHasMoreEvents = Object.values(lastEvaluatedKeyOrgEvent).some(key => key !== null);
+        setHasMore(stillHasMoreEvents || lastEvaluatedKeyOrg !== null);
 
-        console.log('Has more events:', anyOrgHasMoreEvents);
-        console.log('Has more orgs:', canFetchMoreOrgs);
-
-        setHasMore(canFetchMoreOrgs);
         setLoading(false);
     };
 
@@ -249,45 +250,52 @@ const Events: React.FC = () => {
                             />
                         </Row>
                     </div>
-                    <div className="p-3 bg-dark text-white">
-                        <Row className="align-items-center mb-4">
-                            <Col>
-                                <h1 className="mb-4">Events</h1>
-                            </Col>
-
-                            <Col xs="auto" className="ms-auto me-5">
-                                {pageActionComponents}
-                            </Col>
-                        </Row>
-                        <Row>
-                            {error && <p className="text-red-500">{error}</p>}
-
-                            {events.map(event => (
+                    <div className="p-3 bg-dark text-white min-vh-100"> {/* Ensure min-vh-100 */}
+                        <Container fluid>
+                            <Row className="align-items-center mb-4">
                                 <Col>
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
-                                        <GalleryCard
-                                            key={event.id}
-                                            item={event}
-                                            className={`event-card`}
-                                            orgName={event.GSI2PK}
-                                        />
-                                    </div>
+                                    <h1 className="mb-0">Events</h1> {/* Reduced margin */}
                                 </Col>
-                            ))}
-                            <div className="text-center mt-4 mb-4">
-                                {hasMore && (
-                                    <div className="text-center mt-4 mb-4">
+                                <Col xs="auto" className="ms-auto me-5">
+                                    {pageActionComponents}
+                                </Col>
+                            </Row>
+                            {error && <Alert variant="danger">{error}</Alert>}
+                            <Row className="g-4"> {/* Use g-4 for consistent gap */}
+                                {loading && events.length === 0 ? (
+                                    <div className="text-center p-5">Loading events...</div>
+                                ) : filteredEvents.length === 0 ? (
+                                    <div className="text-center p-5">
+                                        {searchTerm
+                                            ? 'No events found matching your search.'
+                                            : 'No events found.'}
+                                    </div>
+                                ) : (
+                                    filteredEvents.map(event => (
+                                        <Col key={event.id} xs={12} sm={6} md={4} lg={3}> {/* Responsive grid */}
+                                            <GalleryCard
+                                                item={event}
+                                                className={`event-card`}
+                                                orgName={event.GSI2PK} // Pass organization identifier
+                                            />
+                                        </Col>
+                                    ))
+                                )}
+                            </Row>
+                            {hasMore && events.length > 0 && !searchTerm && ( // Show Load More only if not searching
+                                <Row className="mt-4">
+                                    <Col className="text-center">
                                         <Button
                                             onClick={loadMore}
                                             disabled={loading}
-                                            //className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                                            variant="primary"
                                         >
                                             {loading ? 'Loading...' : 'Load More'}
                                         </Button>
-                                    </div>
-                                )}
-                            </div>
-                        </Row>
+                                    </Col>
+                                </Row>
+                            )}
+                        </Container>
                     </div>
                 </Col>
             </Row>
