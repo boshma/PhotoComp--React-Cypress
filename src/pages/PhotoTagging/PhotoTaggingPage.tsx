@@ -1,3 +1,4 @@
+// src/pages/PhotoTagging/PhotoTaggingPage.tsx
 import React, { useState, useEffect, useContext } from 'react';
 import { Container, Row, Col, Button, Alert, Spinner } from 'react-bootstrap';
 import { NavLink, useParams, useNavigate } from 'react-router-dom';
@@ -11,28 +12,27 @@ import SearchBar from '../../components/bars/SearchBar/SearchBar';
 import NavButton from '../../components/navButton/NavButton';
 import MemberCard from '../../components/cards/memberCard/MemberCard';
 import axiosInstance from '../../utils/axios';
-import { getEventAttendees } from '../../context/EventService';
+import { getEventAttendees } from '../../context/EventService'; // Assuming this function returns user IDs or basic info
 
 // Define types for our data models
-interface User {
+interface UserDetails {
     id: string;
     email: string;
     firstName: string;
     lastName: string;
 }
 
-interface Member {
-    PK: string;
-    SK: string;
+// Combining Member and EventAttendee concepts for clarity on this page
+interface AttendeeForTagging {
+    PK: string; // Primary Key format (e.g., USER#userId)
+    SK: string; // Sort Key format (e.g., EVENT#eventId)
     userId: string;
-    role: string;
-    joinDate: string;
+    role: string; // Role within the organization (might not be directly relevant here but good to have)
+    joinDate?: string; // Join date for the organization (might not be directly relevant here)
     organizationName: string;
-    userDetails: User;
-}
-
-interface EventAttendee extends Member {
-    eventId: string;
+    eventId: string; // Added eventId for context
+    userDetails: UserDetails | null; // UserDetails can be null initially while loading
+    isLoadingDetails?: boolean; // Flag to indicate if details are being fetched
 }
 
 const PhotoTaggingPage: React.FC = () => {
@@ -42,8 +42,8 @@ const PhotoTaggingPage: React.FC = () => {
 
     // State for search and members
     const [searchTerm, setSearchTerm] = useState('');
-    const [attendees, setAttendees] = useState<EventAttendee[]>([]);
-    const [filteredAttendees, setFilteredAttendees] = useState<EventAttendee[]>([]);
+    const [attendees, setAttendees] = useState<AttendeeForTagging[]>([]); // Use the combined type
+    const [filteredAttendees, setFilteredAttendees] = useState<AttendeeForTagging[]>([]);
     const [loading, setLoading] = useState<boolean>(true);
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
@@ -52,208 +52,180 @@ const PhotoTaggingPage: React.FC = () => {
     const [eventName, setEventName] = useState<string>('');
 
     // Pagination state - modified for better scrolling experience
-    const [initialDisplayCount, setInitialDisplayCount] = useState<number>(12); // Initial number to display
+    const [initialDisplayCount] = useState<number>(12); // Initial number to display
     const [displayCount, setDisplayCount] = useState<number>(12); // Current display count
     const [hasMore, setHasMore] = useState<boolean>(true);
     const [loadingMore, setLoadingMore] = useState<boolean>(false);
-    const [lastEvaluatedKey, setLastEvaluatedKey] = useState<string | null>(null);
 
-    // Fetch attendees for the event
+    // Helper function to fetch details for a single user ID
+    const fetchUserDetails = async (userId: string): Promise<UserDetails | null> => {
+        try {
+            // Check if it's the current user to optimize
+            if (user && userId === user.id) {
+                return {
+                    id: user.id,
+                    email: user.email,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                };
+            }
+            // Fetch details from the API
+            const userResponse = await axiosInstance.get(`/users/${userId}`);
+            const userData = userResponse.data?.data?.user;
+            if (userData && userData.firstName && userData.lastName) {
+                return {
+                    id: userId,
+                    email: userData.email || `${userId}@unknown.com`, // Provide fallback email
+                    firstName: userData.firstName,
+                    lastName: userData.lastName,
+                };
+            }
+            console.warn(`Could not fetch full details for user ${userId}`);
+            return null; // Return null if details are incomplete or fetch failed
+        } catch (userError) {
+            console.error(`Error fetching details for user ${userId}:`, userError);
+            return null; // Return null on error
+        }
+    };
+
+    // Fetch initial list of attendee IDs and then fetch details
     useEffect(() => {
-        const fetchAttendees = async () => {
+        const fetchInitialAttendees = async () => {
             if (!orgId || !eventId || !photoId) {
                 setError('Missing organization, event, or photo ID');
                 setLoading(false);
                 return;
             }
 
-            try {
-                setLoading(true);
-                setError(null);
+            setLoading(true);
+            setError(null);
 
-                // First get event details to display the event name
+            try {
+                // Fetch event name (optional, but good for context)
                 try {
                     const eventResponse = await axiosInstance.get(
                         `/organizations/${orgId}/events/${eventId}`
                     );
-                    if (
-                        eventResponse.data &&
-                        eventResponse.data.data &&
-                        eventResponse.data.data.event
-                    ) {
-                        setEventName(eventResponse.data.data.event.title);
-                    }
+                    setEventName(eventResponse.data?.data?.event?.title || 'Event');
                 } catch (eventError) {
-                    console.error('Error fetching event details:', eventError);
-                    // Continue with attendee fetching even if event details fail
+                    console.warn('Could not fetch event name:', eventError);
+                    setEventName('Event');
                 }
 
-                // Fetch event attendees using the correct endpoint and handling
-                try {
-                    // Using the getEventAttendees helper from EventService for consistency
-                    const attendees = await getEventAttendees(orgId, eventId);
+                // Fetch the list of attendee IDs
+                const attendeeIds = await getEventAttendees(orgId, eventId);
 
-                    console.log('Raw attendees response:', attendees); // Debug log
+                if (!attendeeIds || attendeeIds.length === 0) {
+                    setAttendees([]);
+                    setFilteredAttendees([]);
+                    setHasMore(false);
+                    setLoading(false);
+                    return;
+                }
 
-                    if (attendees && attendees.length > 0) {
-                        // Transform attendees to expected format if needed
-                        const formattedAttendees = await Promise.all(
-                            attendees.map(async attendee => {
-                                // Extract userId from format like USER#userId
-                                let userId = '';
-                                if (typeof attendee === 'string') {
-                                    userId = attendee.includes('#')
-                                        ? attendee.split('#')[1]
-                                        : attendee;
-                                } else if (attendee && typeof attendee === 'object') {
-                                    // Handle object type with userId property
-                                    userId = (attendee as any).userId || '';
-                                }
-
-                                // Check if this is the current logged-in user
-                                if (user && userId === user.id) {
-                                    console.log(
-                                        'Found current user in attendees, using their profile data'
-                                    );
-                                    // Use the current user's data from AuthContext
-                                    return {
-                                        PK: `USER#${userId}`,
-                                        SK: `EVENT#${eventId}`,
-                                        userId: userId,
-                                        role: user.role || 'MEMBER',
-                                        joinDate: new Date().toISOString(),
-                                        organizationName: orgId,
-                                        eventId: eventId,
-                                        userDetails: {
-                                            id: userId,
-                                            email: user.email,
-                                            firstName: user.firstName,
-                                            lastName: user.lastName,
-                                        },
-                                    };
-                                }
-
-                                // Fetch user details for this attendee
-                                try {
-                                    const userResponse = await axiosInstance.get(
-                                        `/users/${userId}`
-                                    );
-                                    const userData = userResponse.data.data?.user || {};
-
-                                    // Create a properly formatted attendee object
-                                    return {
-                                        PK: `USER#${userId}`,
-                                        SK: `EVENT#${eventId}`,
-                                        userId: userId,
-                                        role: 'MEMBER', // Default role
-                                        joinDate: new Date().toISOString(),
-                                        organizationName: orgId,
-                                        eventId: eventId,
-                                        userDetails: {
-                                            id: userId,
-                                            email: userData.email || `${userId}@example.com`,
-                                            firstName: userData.firstName || 'Attendee', // Changed from 'User'
-                                            lastName: userData.lastName || 'User', // Changed from userId substring
-                                        },
-                                    };
-                                } catch (userError) {
-                                    console.error(
-                                        `Error fetching details for user ${userId}:`,
-                                        userError
-                                    );
-                                    // Return a placeholder object with available info
-                                    return {
-                                        PK: `USER#${userId}`,
-                                        SK: `EVENT#${eventId}`,
-                                        userId: userId,
-                                        role: 'MEMBER',
-                                        joinDate: new Date().toISOString(),
-                                        organizationName: orgId,
-                                        eventId: eventId,
-                                        userDetails: {
-                                            id: userId,
-                                            email: `${userId}@example.com`,
-                                            firstName: 'Attendee', // Changed from 'User'
-                                            lastName: 'User', // Changed from userId
-                                        },
-                                    };
-                                }
-                            })
-                        );
-
-                        console.log('Formatted attendees:', formattedAttendees); // Debug log
-                        setAttendees(formattedAttendees);
-                        setFilteredAttendees(formattedAttendees);
-
-                        // Update hasMore based on number of attendees vs. initial display count
-                        setHasMore(formattedAttendees.length > initialDisplayCount);
-                    } else {
-                        console.log('No attendees found or invalid response format');
-                        setAttendees([]);
-                        setFilteredAttendees([]);
-                        setHasMore(false);
+                // Create initial attendee objects with loading state
+                const initialAttendeeList: AttendeeForTagging[] = attendeeIds.map(attIdInfo => {
+                    let userId = '';
+                    if (typeof attIdInfo === 'string') {
+                        userId = attIdInfo.includes('#') ? attIdInfo.split('#')[1] : attIdInfo;
+                    } else if (attIdInfo && typeof attIdInfo === 'object') {
+                        userId = (attIdInfo as any).userId || '';
                     }
-                } catch (attendeesError) {
-                    console.error('Error fetching attendees:', attendeesError);
-                    throw attendeesError;
-                }
 
-                setLoading(false);
+                    return {
+                        PK: `USER#${userId}`,
+                        SK: `EVENT#${eventId}`,
+                        userId: userId,
+                        role: 'MEMBER', // Default role, might need adjustment if role info is available
+                        organizationName: orgId,
+                        eventId: eventId,
+                        userDetails: null, // Start with null details
+                        isLoadingDetails: true, // Mark as loading
+                    };
+                }).filter(att => att.userId); // Ensure we have a valid userId
+
+                setAttendees(initialAttendeeList);
+                setFilteredAttendees(initialAttendeeList); // Initially show all (loading)
+                setDisplayCount(Math.min(initialAttendeeList.length, initialDisplayCount));
+                setHasMore(initialAttendeeList.length > initialDisplayCount);
+                setLoading(false); // Initial list is ready (though details might still be loading)
+
+                // Now, fetch details for each attendee asynchronously
+                initialAttendeeList.forEach(async (attendee) => {
+                    const details = await fetchUserDetails(attendee.userId);
+                    setAttendees(prev =>
+                        prev.map(a =>
+                            a.userId === attendee.userId
+                                ? { ...a, userDetails: details, isLoadingDetails: false }
+                                : a
+                        )
+                    );
+                });
+
             } catch (err) {
-                console.error('Error in main fetchAttendees function:', err);
+                console.error('Error fetching attendees:', err);
                 setError('Failed to load event attendees. Please try again later.');
+                setAttendees([]);
+                setFilteredAttendees([]);
+                setHasMore(false);
                 setLoading(false);
             }
         };
 
-        fetchAttendees();
-    }, [orgId, eventId, photoId, initialDisplayCount]);
+        fetchInitialAttendees();
+    }, [orgId, eventId, photoId, initialDisplayCount, user]); // Add `user` dependency
 
-    // Handle load more function
-    const handleLoadMore = () => {
-        setLoadingMore(true);
-
-        // Simulate loading delay for better UX (remove in production)
-        setTimeout(() => {
-            // Increase display count by the initial batch size
-            const newDisplayCount = displayCount + initialDisplayCount;
-            setDisplayCount(newDisplayCount);
-
-            // Check if we've reached the end of our data
-            setHasMore(newDisplayCount < filteredAttendees.length);
-            setLoadingMore(false);
-        }, 500);
-    };
-
-    // Filter attendees based on search term
+    // Filter attendees based on search term and details loading state
     useEffect(() => {
-        if (searchTerm.trim() === '') {
-            setFilteredAttendees(attendees);
-            // Reset display count when clearing search
-            setDisplayCount(initialDisplayCount);
-            setHasMore(attendees.length > initialDisplayCount);
-        } else {
-            const filtered = attendees.filter((attendee: EventAttendee) => {
-                const { firstName, lastName, email } = attendee.userDetails;
-                const fullName = `${firstName} ${lastName}`.toLowerCase();
-                const searchLower = searchTerm.toLowerCase();
+        const applyFilter = () => {
+            let filtered = attendees;
 
-                return fullName.includes(searchLower) || email.toLowerCase().includes(searchLower);
-            });
+            if (searchTerm.trim() !== '') {
+                const searchLower = searchTerm.toLowerCase();
+                filtered = attendees.filter((attendee: AttendeeForTagging) => {
+                    // Search even if details are loading (search by ID)
+                    if (attendee.isLoadingDetails) {
+                        return attendee.userId.toLowerCase().includes(searchLower);
+                    }
+                    // Search by name/email if details are loaded
+                    if (attendee.userDetails) {
+                        const { firstName, lastName, email } = attendee.userDetails;
+                        const fullName = `${firstName} ${lastName}`.toLowerCase();
+                        return fullName.includes(searchLower) || email.toLowerCase().includes(searchLower);
+                    }
+                    // Fallback if details couldn't be loaded
+                    return attendee.userId.toLowerCase().includes(searchLower);
+                });
+            }
 
             setFilteredAttendees(filtered);
-            // Show all search results immediately
-            setDisplayCount(filtered.length);
-            setHasMore(false);
-        }
-    }, [attendees, searchTerm, initialDisplayCount]);
+            // Adjust display count and hasMore based on the *filtered* list
+            setDisplayCount(Math.min(filtered.length, initialDisplayCount));
+            setHasMore(filtered.length > initialDisplayCount);
+        };
+
+        applyFilter();
+
+    }, [attendees, searchTerm, initialDisplayCount]); // Rerun filter when attendees data updates (details load)
 
     // Get the currently visible members based on display count
     const visibleAttendees = filteredAttendees.slice(0, displayCount);
 
+    // Handle load more function
+    const handleLoadMore = () => {
+        setLoadingMore(true);
+        const newDisplayCount = Math.min(displayCount + initialDisplayCount, filteredAttendees.length);
+        setDisplayCount(newDisplayCount);
+        setHasMore(newDisplayCount < filteredAttendees.length);
+        // Simulate delay if needed, otherwise just update state
+        setTimeout(() => setLoadingMore(false), 200); // Short delay for visual feedback
+    };
+
     // Handle search change
     const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setSearchTerm(e.target.value);
+        // Reset display count when search term changes to show initial results of the search
+        setDisplayCount(initialDisplayCount);
     };
 
     const handleSearchSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -261,12 +233,12 @@ const PhotoTaggingPage: React.FC = () => {
     };
 
     // Toggle member selection
-    const handleMemberSelect = (memberId: string) => {
+    const handleMemberSelect = (userId: string) => {
         setSelectedMembers(prev => {
-            if (prev.includes(memberId)) {
-                return prev.filter(id => id !== memberId);
+            if (prev.includes(userId)) {
+                return prev.filter(id => id !== userId);
             } else {
-                return [...prev, memberId];
+                return [...prev, userId];
             }
         });
     };
@@ -286,6 +258,7 @@ const PhotoTaggingPage: React.FC = () => {
         try {
             setSubmitting(true);
             setError(null);
+            setSuccess(null); // Clear previous success message
 
             const response = await axiosInstance.post(
                 `/organizations/${orgId}/events/${eventId}/photos/${photoId}/tags`,
@@ -295,20 +268,17 @@ const PhotoTaggingPage: React.FC = () => {
             console.log('Tag response:', response.data);
             setSuccess('Members tagged successfully!');
             setSubmitting(false);
+            setSelectedMembers([]); // Clear selection after successful tagging
 
-            // Redirect back to photo page after a short delay
+            // Optionally redirect after success
             setTimeout(() => {
-                navigate(`/organizations/${orgId}/events/${eventId}/photos/${photoId}`);
-            }, 1500);
+                 navigate(`/organizations/${orgId}/events/${eventId}/photos/${photoId}`);
+             }, 1500);
+
         } catch (err: any) {
             console.error('Error tagging members:', err);
-
-            if (err.response && err.response.data && err.response.data.message) {
-                setError(err.response.data.message);
-            } else {
-                setError('Failed to tag members. Please try again.');
-            }
-
+            const apiErrorMessage = err.response?.data?.message;
+            setError(apiErrorMessage || 'Failed to tag members. Please try again.');
             setSubmitting(false);
         }
     };
@@ -318,13 +288,13 @@ const PhotoTaggingPage: React.FC = () => {
         navigate(`/organizations/${orgId}/events/${eventId}/photos/${photoId}`);
     };
 
-    // TopBar components
+    // --- TopBar components ---
     const searchComponent = (
         <SearchBar
             value={searchTerm}
             onChange={handleSearchChange}
             onSubmit={handleSearchSubmit}
-            placeholder="Search members..."
+            placeholder="Search attendees..."
             className="ms-3"
         />
     );
@@ -358,6 +328,7 @@ const PhotoTaggingPage: React.FC = () => {
             </div>
         </>
     );
+    // --- End TopBar components ---
 
     return (
         <>
@@ -420,13 +391,13 @@ const PhotoTaggingPage: React.FC = () => {
                                 <div className="text-center p-5">
                                     {searchTerm
                                         ? 'No matching members found.'
-                                        : 'No members attended this event.'}
+                                        : 'No members attended this event or details could not be loaded.'}
                                 </div>
                             ) : (
                                 <>
                                     {/* Display members in a card grid layout */}
                                     <Row className="g-4 member-cards-container mb-4">
-                                        {visibleAttendees.map((attendee: EventAttendee) => (
+                                        {visibleAttendees.map((attendee: AttendeeForTagging) => (
                                             <Col
                                                 xs={12}
                                                 sm={6}
@@ -435,12 +406,27 @@ const PhotoTaggingPage: React.FC = () => {
                                                 key={attendee.userId}
                                                 className="d-flex justify-content-center"
                                             >
+                                                {/* Pass necessary props, handle loading/missing details */}
                                                 <MemberCard
-                                                    member={attendee}
+                                                   // Cast to the expected Member type for the card, handling potentially null userDetails
+                                                   member={{
+                                                        ...attendee,
+                                                        // Provide default userDetails if null or loading, or handle inside MemberCard
+                                                        userDetails: attendee.userDetails || {
+                                                            id: attendee.userId,
+                                                            email: `${attendee.userId}@unknown.com`,
+                                                            firstName: attendee.isLoadingDetails ? 'Loading...' : 'Attendee',
+                                                            lastName: attendee.isLoadingDetails ? '' : 'User',
+                                                        },
+                                                        // Ensure other required Member fields are present, even if defaults
+                                                        role: attendee.role || 'MEMBER',
+                                                        joinDate: attendee.joinDate || new Date().toISOString(),
+                                                    }}
                                                     isSelected={selectedMembers.includes(
                                                         attendee.userId
                                                     )}
-                                                    onSelect={handleMemberSelect}
+                                                    // Disable selection if details are still loading or failed
+                                                    onSelect={attendee.userDetails && !attendee.isLoadingDetails ? handleMemberSelect : () => {}}
                                                 />
                                             </Col>
                                         ))}
@@ -489,7 +475,7 @@ const PhotoTaggingPage: React.FC = () => {
                                 <Button
                                     variant="secondary"
                                     onClick={handleSubmitTags}
-                                    disabled={selectedMembers.length === 0 || submitting}
+                                    disabled={selectedMembers.length === 0 || submitting || loading} // Disable if loading attendees too
                                 >
                                     {submitting ? (
                                         <>
